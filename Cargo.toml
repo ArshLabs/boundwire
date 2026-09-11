@@ -1,0 +1,11 @@
+[package]
+name = "boundwire"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
