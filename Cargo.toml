@@ -7,5 +7,5 @@ publish = false
 [dependencies]
 bytes = "1"
 futures-util = { version = "0.3", features = ["sink"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
