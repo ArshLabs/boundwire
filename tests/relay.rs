@@ -195,6 +195,45 @@ async fn rejects_commands_until_hello_arrives() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn silent_connection_releases_its_slot() -> io::Result<()> {
+    let limits = Limits {
+        max_connections: 1,
+        ..Limits::default()
+    };
+    let server = TestServer::start(limits.clone()).await?;
+    let mut silent = TcpStream::connect(server.address).await?;
+
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(7), silent.read(&mut byte))
+        .await
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "silent connection kept its slot")
+        })??;
+    assert_eq!(read, 0);
+
+    let _client = TestClient::connect(server.address, &limits, b"after-timeout").await?;
+    server.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_connection_survives_handshake_deadline() -> io::Result<()> {
+    let limits = Limits::default();
+    let server = TestServer::start(limits.clone()).await?;
+    let mut client = TestClient::connect(server.address, &limits, b"active").await?;
+
+    tokio::time::sleep(Duration::from_millis(5_100)).await;
+    client.send(subscribe(2, b"still-active")).await?;
+    assert!(matches!(
+        client.receive().await?,
+        ServerFrame::Ack { request_id: 2, .. }
+    ));
+
+    server.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn slow_socket_does_not_block_fast_subscriber() -> io::Result<()> {
     let limits = Limits {
         outbound_queue: 2,

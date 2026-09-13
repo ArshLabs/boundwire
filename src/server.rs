@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -15,6 +15,8 @@ use crate::{
         encode_server_message,
     },
 };
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq)]
 pub struct ServerReport {
@@ -120,11 +122,14 @@ async fn serve_connection(
     let (outgoing, mut outbound) = mpsc::channel(limits.outbound_queue);
     let force_close = CancellationToken::new();
     let mut active = false;
+    let handshake_deadline = tokio::time::sleep(HANDSHAKE_TIMEOUT);
+    tokio::pin!(handshake_deadline);
 
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
             _ = force_close.cancelled() => break,
+            _ = &mut handshake_deadline, if !active => break,
             message = outbound.recv() => {
                 let Some(message) = message else {
                     break;
