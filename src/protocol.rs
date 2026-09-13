@@ -106,6 +106,10 @@ impl Topic {
             String::from_utf8(bytes.to_vec()).expect("validated ASCII is UTF-8"),
         ))
     }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -161,6 +165,32 @@ pub(crate) enum ServerMessage {
     },
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReceivedMessage {
+    Ready {
+        request_id: u32,
+        connection_id: u64,
+    },
+    Ack {
+        request_id: u32,
+        acknowledged_kind: u8,
+        event_id: u64,
+        matched: u16,
+        enqueued: u16,
+        evicted: u16,
+    },
+    Event {
+        event_id: u64,
+        topic: Topic,
+        payload: Bytes,
+    },
+    Error {
+        request_id: u32,
+        code: u16,
+        detail: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u16)]
 pub(crate) enum ErrorCode {
@@ -182,6 +212,8 @@ pub enum ProtocolError {
     InvalidTopic,
     PayloadTooLarge,
     EncodedFrameTooLarge,
+    UnexpectedRequestId,
+    InvalidUtf8,
 }
 
 impl fmt::Display for ProtocolError {
@@ -204,6 +236,8 @@ impl fmt::Display for ProtocolError {
             Self::EncodedFrameTooLarge => {
                 f.write_str("server message exceeds the configured frame limit")
             }
+            Self::UnexpectedRequestId => f.write_str("message contains an unexpected request ID"),
+            Self::InvalidUtf8 => f.write_str("message contains invalid UTF-8"),
         }
     }
 }
@@ -255,6 +289,125 @@ pub(crate) fn decode_client_message(
                 request_id,
                 topic,
                 payload: bytes,
+            })
+        }
+        other => Err(ProtocolError::UnknownKind(other)),
+    }
+}
+
+pub(crate) fn encode_client_message(
+    message: &ClientMessage,
+    limits: &Limits,
+) -> Result<Bytes, ProtocolError> {
+    let mut frame = BytesMut::new();
+    frame.put_u8(VERSION);
+
+    match message {
+        ClientMessage::Hello {
+            request_id,
+            client_id,
+        } => {
+            frame.put_u8(HELLO);
+            frame.put_u32(*request_id);
+            put_named_field(&mut frame, client_id.0.as_bytes());
+        }
+        ClientMessage::Subscribe { request_id, topic } => {
+            frame.put_u8(SUBSCRIBE);
+            frame.put_u32(*request_id);
+            put_named_field(&mut frame, topic.0.as_bytes());
+        }
+        ClientMessage::Publish {
+            request_id,
+            topic,
+            payload,
+        } => {
+            if payload.len() > limits.max_payload_len {
+                return Err(ProtocolError::PayloadTooLarge);
+            }
+            frame.put_u8(PUBLISH);
+            frame.put_u32(*request_id);
+            put_named_field(&mut frame, topic.0.as_bytes());
+            frame.extend_from_slice(payload);
+        }
+    }
+
+    if message.request_id() == 0 {
+        return Err(ProtocolError::ZeroRequestId);
+    }
+    if frame.len() > limits.max_frame_len {
+        return Err(ProtocolError::EncodedFrameTooLarge);
+    }
+    Ok(frame.freeze())
+}
+
+pub(crate) fn decode_server_message(
+    frame: BytesMut,
+    limits: &Limits,
+) -> Result<ReceivedMessage, ProtocolError> {
+    if frame.len() < HEADER_LEN {
+        return Err(ProtocolError::FrameTooShort);
+    }
+
+    let mut bytes = frame.freeze();
+    let version = bytes.get_u8();
+    if version != VERSION {
+        return Err(ProtocolError::UnknownVersion(version));
+    }
+    let kind = bytes.get_u8();
+    let request_id = bytes.get_u32();
+
+    match kind {
+        READY => {
+            require_request_id(request_id, true)?;
+            require_remaining(&bytes, 8)?;
+            let connection_id = bytes.get_u64();
+            require_empty(&bytes)?;
+            Ok(ReceivedMessage::Ready {
+                request_id,
+                connection_id,
+            })
+        }
+        ACK => {
+            require_request_id(request_id, true)?;
+            require_remaining(&bytes, 15)?;
+            let message = ReceivedMessage::Ack {
+                request_id,
+                acknowledged_kind: bytes.get_u8(),
+                event_id: bytes.get_u64(),
+                matched: bytes.get_u16(),
+                enqueued: bytes.get_u16(),
+                evicted: bytes.get_u16(),
+            };
+            require_empty(&bytes)?;
+            Ok(message)
+        }
+        EVENT => {
+            require_request_id(request_id, false)?;
+            require_remaining(&bytes, 8)?;
+            let event_id = bytes.get_u64();
+            let topic = Topic::parse(&take_named_field(&mut bytes, limits)?, limits)?;
+            if bytes.len() > limits.max_payload_len {
+                return Err(ProtocolError::PayloadTooLarge);
+            }
+            Ok(ReceivedMessage::Event {
+                event_id,
+                topic,
+                payload: bytes,
+            })
+        }
+        ERROR => {
+            require_request_id(request_id, true)?;
+            require_remaining(&bytes, 4)?;
+            let code = bytes.get_u16();
+            let detail_len = bytes.get_u16() as usize;
+            require_remaining(&bytes, detail_len)?;
+            let detail = String::from_utf8(bytes.split_to(detail_len).to_vec())
+                .map_err(|_| ProtocolError::InvalidUtf8)?;
+            require_empty(&bytes)?;
+            Ok(ReceivedMessage::Error {
+                request_id,
+                code,
+                detail,
             })
         }
         other => Err(ProtocolError::UnknownKind(other)),
@@ -336,6 +489,27 @@ fn take_named_field(bytes: &mut Bytes, limits: &Limits) -> Result<Bytes, Protoco
         return Err(ProtocolError::TruncatedField);
     }
     Ok(bytes.split_to(length))
+}
+
+fn put_named_field(frame: &mut BytesMut, value: &[u8]) {
+    frame.put_u8(value.len() as u8);
+    frame.extend_from_slice(value);
+}
+
+fn require_remaining(bytes: &Bytes, length: usize) -> Result<(), ProtocolError> {
+    if bytes.remaining() < length {
+        Err(ProtocolError::TruncatedField)
+    } else {
+        Ok(())
+    }
+}
+
+fn require_request_id(request_id: u32, present: bool) -> Result<(), ProtocolError> {
+    if (request_id != 0) == present {
+        Ok(())
+    } else {
+        Err(ProtocolError::UnexpectedRequestId)
+    }
 }
 
 fn require_empty(bytes: &Bytes) -> Result<(), ProtocolError> {
