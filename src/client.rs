@@ -36,8 +36,8 @@ pub struct Subscription {
 
 pub async fn publish(address: &str, topic: &str, payload: Bytes) -> io::Result<PublishReceipt> {
     let limits = Limits::default();
-    let mut framed = connect(address, "boundwire-publisher", &limits).await?;
     let topic = parse_topic(topic, &limits)?;
+    let mut framed = connect(address, "boundwire-publisher", &limits).await?;
     send(
         &mut framed,
         &limits,
@@ -69,8 +69,8 @@ pub async fn publish(address: &str, topic: &str, payload: Bytes) -> io::Result<P
 
 pub async fn subscribe(address: &str, topic: &str) -> io::Result<Subscription> {
     let limits = Limits::default();
-    let mut framed = connect(address, "boundwire-subscriber", &limits).await?;
     let topic = parse_topic(topic, &limits)?;
+    let mut framed = connect(address, "boundwire-subscriber", &limits).await?;
     send(
         &mut framed,
         &limits,
@@ -220,5 +220,21 @@ mod tests {
         shutdown.cancel();
         server.await.map_err(io::Error::other)??;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_topic_is_reported_before_connecting() {
+        let publish_error = publish("127.0.0.1:0", "bad topic", Bytes::new())
+            .await
+            .unwrap_err();
+        assert_eq!(publish_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(publish_error.to_string().contains("topic"));
+
+        let subscribe_error = subscribe("127.0.0.1:0", "bad topic")
+            .await
+            .err()
+            .expect("invalid topic should fail");
+        assert_eq!(subscribe_error.kind(), io::ErrorKind::InvalidInput);
+        assert!(subscribe_error.to_string().contains("topic"));
     }
 }
