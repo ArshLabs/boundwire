@@ -6,8 +6,8 @@ use tokio::{net::TcpStream, time::timeout};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::{
-    ClientId, ClientMessage, Limits, PUBLISH_KIND, ReceivedMessage, SUBSCRIBE_KIND, Topic,
-    decode_server_message, encode_client_message,
+    ClientId, ClientMessage, Limits, PUBLISH_KIND, ProtocolError, ReceivedMessage, SUBSCRIBE_KIND,
+    Topic, decode_server_message, encode_client_message,
 };
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,6 +37,9 @@ pub struct Subscription {
 pub async fn publish(address: &str, topic: &str, payload: Bytes) -> io::Result<PublishReceipt> {
     let limits = Limits::default();
     let topic = parse_topic(topic, &limits)?;
+    if payload.len() > limits.max_payload_len {
+        return Err(invalid_input(ProtocolError::PayloadTooLarge));
+    }
     let mut framed = connect(address, "boundwire-publisher", &limits).await?;
     send(
         &mut framed,
@@ -236,5 +239,20 @@ mod tests {
             .expect("invalid topic should fail");
         assert_eq!(subscribe_error.kind(), io::ErrorKind::InvalidInput);
         assert!(subscribe_error.to_string().contains("topic"));
+    }
+
+    #[tokio::test]
+    async fn oversized_payload_is_reported_before_connecting() {
+        let limits = Limits::default();
+        let error = publish(
+            "127.0.0.1:0",
+            "blocks",
+            Bytes::from(vec![0; limits.max_payload_len + 1]),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("payload"));
     }
 }
