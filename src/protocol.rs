@@ -38,9 +38,14 @@ impl Default for Limits {
 
 impl Limits {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.broker_queue == 0 || self.outbound_queue == 0 || self.max_connections == 0 {
+        if self.broker_queue == 0 || self.max_connections == 0 {
             return Err(ProtocolError::InvalidLimits(
-                "queue and connection limits must be nonzero",
+                "broker queue and connection limits must be nonzero",
+            ));
+        }
+        if self.outbound_queue < 2 {
+            return Err(ProtocolError::InvalidLimits(
+                "outbound queue must hold an event and its acknowledgement",
             ));
         }
         if self.max_name_len == 0 || self.max_name_len > u8::MAX as usize {
@@ -565,6 +570,19 @@ mod tests {
     fn validates_limit_relationships() {
         let limits = Limits {
             max_frame_len: HEADER_LEN + 1 + 64 + 12 * 1024,
+            ..Limits::default()
+        };
+
+        assert!(matches!(
+            limits.validate(),
+            Err(ProtocolError::InvalidLimits(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_single_slot_outbound_queue() {
+        let limits = Limits {
+            outbound_queue: 1,
             ..Limits::default()
         };
 
