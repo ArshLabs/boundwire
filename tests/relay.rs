@@ -234,6 +234,28 @@ async fn active_connection_survives_handshake_deadline() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn reports_connections_rejected_at_limit() -> io::Result<()> {
+    let limits = Limits {
+        max_connections: 1,
+        ..Limits::default()
+    };
+    let server = TestServer::start(limits.clone()).await?;
+    let _active = TestClient::connect(server.address, &limits, b"active").await?;
+    let mut rejected = TcpStream::connect(server.address).await?;
+
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(5), rejected.read(&mut byte))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "extra connection stayed open"))??;
+    assert_eq!(read, 0);
+
+    let report = server.stop().await?;
+    assert_eq!(report.accepted_connections, 1);
+    assert_eq!(report.rejected_connections, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn slow_socket_does_not_block_fast_subscriber() -> io::Result<()> {
     let limits = Limits {
         outbound_queue: 2,
