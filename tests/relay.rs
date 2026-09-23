@@ -195,6 +195,31 @@ async fn rejects_commands_until_hello_arrives() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn repeated_hello_is_rejected_without_closing_connection() -> io::Result<()> {
+    let limits = Limits::default();
+    let server = TestServer::start(limits.clone()).await?;
+    let mut client = TestClient::connect(server.address, &limits, b"original").await?;
+
+    client.send(hello(2, b"replacement")).await?;
+    assert!(matches!(
+        client.receive().await?,
+        ServerFrame::Error {
+            request_id: 2,
+            code: 2,
+        }
+    ));
+
+    client.send(subscribe(3, b"still-active")).await?;
+    assert!(matches!(
+        client.receive().await?,
+        ServerFrame::Ack { request_id: 3, .. }
+    ));
+
+    server.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn silent_connection_releases_its_slot() -> io::Result<()> {
     let limits = Limits {
         max_connections: 1,
