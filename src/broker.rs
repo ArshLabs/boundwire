@@ -209,7 +209,6 @@ impl Broker {
                 ServerMessage::Error {
                     request_id,
                     code: ErrorCode::TooManySubscriptions,
-                    detail: "subscription limit reached",
                 },
             );
             return;
@@ -238,7 +237,6 @@ impl Broker {
                 ServerMessage::Error {
                     request_id,
                     code: ErrorCode::EventIdExhausted,
-                    detail: "event ID space is exhausted",
                 },
             );
             return;

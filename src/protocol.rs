@@ -64,6 +64,21 @@ impl Limits {
                 "a maximum event must fit in one frame",
             ));
         }
+        let control_len = [
+            ErrorCode::ExpectedHello,
+            ErrorCode::AlreadyActive,
+            ErrorCode::EventIdExhausted,
+            ErrorCode::TooManySubscriptions,
+        ]
+        .into_iter()
+        .fold(HEADER_LEN + 15, |length, code| {
+            length.max(HEADER_LEN + 4 + code.detail().len())
+        });
+        if self.max_frame_len < control_len {
+            return Err(ProtocolError::InvalidLimits(
+                "frame limit is too small for server replies",
+            ));
+        }
         if self.max_connections > u16::MAX as usize {
             return Err(ProtocolError::InvalidLimits(
                 "connection limit must fit in acknowledgement counts",
@@ -168,7 +183,6 @@ pub(crate) enum ServerMessage {
     Error {
         request_id: u32,
         code: ErrorCode,
-        detail: &'static str,
     },
 }
 
@@ -205,6 +219,17 @@ pub(crate) enum ErrorCode {
     AlreadyActive = 2,
     EventIdExhausted = 3,
     TooManySubscriptions = 4,
+}
+
+impl ErrorCode {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::ExpectedHello => "send HELLO before other commands",
+            Self::AlreadyActive => "HELLO was already sent",
+            Self::EventIdExhausted => "no event IDs left",
+            Self::TooManySubscriptions => "too many subscriptions",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -469,11 +494,8 @@ pub(crate) fn encode_server_message(
             frame.extend_from_slice(topic.0.as_bytes());
             frame.extend_from_slice(payload);
         }
-        ServerMessage::Error {
-            request_id,
-            code,
-            detail,
-        } => {
+        ServerMessage::Error { request_id, code } => {
+            let detail = code.detail();
             frame.put_u8(ERROR);
             frame.put_u32(*request_id);
             frame.put_u16(*code as u16);
@@ -605,5 +627,66 @@ mod tests {
             limits.validate(),
             Err(ProtocolError::InvalidLimits(_))
         ));
+    }
+
+    #[test]
+    fn rejects_frames_that_cannot_hold_control_responses() {
+        for max_frame_len in [16, 21, 41] {
+            let limits = Limits {
+                max_frame_len,
+                max_name_len: 1,
+                max_payload_len: 0,
+                ..Limits::default()
+            };
+            assert!(matches!(
+                limits.validate(),
+                Err(ProtocolError::InvalidLimits(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn smallest_valid_frame_holds_control_responses() {
+        let limits = Limits {
+            max_frame_len: 42,
+            max_name_len: 1,
+            max_payload_len: 0,
+            ..Limits::default()
+        };
+        limits.validate().unwrap();
+        let messages = [
+            ServerMessage::Ready {
+                request_id: 1,
+                connection_id: 1,
+            },
+            ServerMessage::Ack {
+                request_id: 1,
+                acknowledged_kind: SUBSCRIBE,
+                event_id: 0,
+                matched: 0,
+                enqueued: 0,
+                evicted: 0,
+            },
+            ServerMessage::Error {
+                request_id: 1,
+                code: ErrorCode::ExpectedHello,
+            },
+            ServerMessage::Error {
+                request_id: 1,
+                code: ErrorCode::AlreadyActive,
+            },
+            ServerMessage::Error {
+                request_id: 1,
+                code: ErrorCode::EventIdExhausted,
+            },
+            ServerMessage::Error {
+                request_id: 1,
+                code: ErrorCode::TooManySubscriptions,
+            },
+        ];
+        for message in messages {
+            let encoded = encode_server_message(&message, &limits).unwrap();
+            decode_server_message(BytesMut::from(encoded.as_ref()), &limits).unwrap();
+        }
     }
 }

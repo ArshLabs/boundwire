@@ -194,7 +194,6 @@ async fn serve_connection(
                             &force_close,
                             request_id,
                             ErrorCode::AlreadyActive,
-                            "HELLO is only valid once",
                         ) {
                             break;
                         }
@@ -219,7 +218,6 @@ async fn serve_connection(
                             &force_close,
                             request_id,
                             ErrorCode::ExpectedHello,
-                            "send HELLO before other commands",
                         ) {
                             break;
                         }
@@ -254,13 +252,8 @@ fn queue_error(
     force_close: &CancellationToken,
     request_id: u32,
     code: ErrorCode,
-    detail: &'static str,
 ) -> bool {
-    match outgoing.try_send(ServerMessage::Error {
-        request_id,
-        code,
-        detail,
-    }) {
+    match outgoing.try_send(ServerMessage::Error { request_id, code }) {
         Ok(()) => false,
         Err(_) => {
             force_close.cancel();
