@@ -132,8 +132,8 @@ async fn serve(address: &str) -> io::Result<()> {
     };
 
     println!(
-        "stopped: {} accepted, {} rejected",
-        report.accepted_connections, report.rejected_connections
+        "stopped: {} accepted, {} rejected, {} forced closed",
+        report.accepted_connections, report.rejected_connections, report.forced_connections
     );
     Ok(())
 }

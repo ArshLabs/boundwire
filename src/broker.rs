@@ -131,6 +131,7 @@ impl Broker {
     async fn run(mut self, shutdown: CancellationToken) {
         loop {
             tokio::select! {
+                biased;
                 _ = shutdown.cancelled() => break,
                 command = self.commands.recv() => match command {
                     Some(command) => self.handle(command),

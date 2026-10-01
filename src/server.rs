@@ -17,11 +17,13 @@ use crate::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, PartialEq)]
 pub struct ServerReport {
     pub accepted_connections: u64,
     pub rejected_connections: u64,
+    pub forced_connections: usize,
 }
 
 pub async fn run_server(
@@ -40,11 +42,13 @@ pub async fn run_server(
     let mut report = ServerReport {
         accepted_connections: 0,
         rejected_connections: 0,
+        forced_connections: 0,
     };
     let mut server_error = None;
 
     loop {
         tokio::select! {
+            biased;
             _ = shutdown.cancelled() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(Err(error)) = joined {
@@ -90,12 +94,20 @@ pub async fn run_server(
         }
     }
 
-    while let Some(result) = connections.join_next().await {
-        if let Err(error) = result {
-            server_error.get_or_insert_with(|| {
-                io::Error::other(format!("connection task failed: {error}"))
-            });
+    drop(listener);
+    let drain = async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                server_error.get_or_insert_with(|| {
+                    io::Error::other(format!("connection task failed: {error}"))
+                });
+            }
         }
+    };
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, drain).await.is_err() {
+        report.forced_connections = connections.len();
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
     }
 
     drop(broker);
@@ -127,6 +139,7 @@ async fn serve_connection(
 
     loop {
         tokio::select! {
+            biased;
             _ = shutdown.cancelled() => break,
             _ = force_close.cancelled() => break,
             _ = &mut handshake_deadline, if !active => break,
@@ -138,7 +151,6 @@ async fn serve_connection(
                     break;
                 };
                 tokio::select! {
-                    _ = shutdown.cancelled() => break,
                     _ = force_close.cancelled() => break,
                     result = framed.send(encoded) => {
                         if result.is_err() {
@@ -207,6 +219,23 @@ async fn serve_connection(
                         ) {
                             break;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if shutdown.is_cancelled() && !force_close.is_cancelled() {
+        outbound.close();
+        while let Some(message) = outbound.recv().await {
+            let Ok(encoded) = encode_server_message(&message, &limits) else {
+                break;
+            };
+            tokio::select! {
+                _ = force_close.cancelled() => break,
+                result = framed.send(encoded) => {
+                    if result.is_err() {
+                        break;
                     }
                 }
             }

@@ -367,6 +367,69 @@ async fn slow_socket_does_not_block_fast_subscriber() -> io::Result<()> {
     Ok(())
 }
 
+const SHUTDOWN_EVENTS: u32 = 1_024;
+
+async fn queued_shutdown_server() -> io::Result<(TestServer, TestClient)> {
+    let limits = Limits {
+        outbound_queue: SHUTDOWN_EVENTS as usize + 2,
+        ..Limits::default()
+    };
+    let server = TestServer::start(limits.clone()).await?;
+    let mut subscriber = TestClient::connect(server.address, &limits, b"drain").await?;
+    subscriber.send(subscribe(2, b"shutdown")).await?;
+    assert!(matches!(
+        subscriber.receive().await?,
+        ServerFrame::Ack { .. }
+    ));
+    let mut publisher = TestClient::connect(server.address, &limits, b"publisher").await?;
+    let payload = vec![7; limits.max_payload_len];
+    for request_id in 2..SHUTDOWN_EVENTS + 2 {
+        publisher
+            .send(publish(request_id, b"shutdown", &payload))
+            .await?;
+        assert!(matches!(
+            publisher.receive().await?,
+            ServerFrame::Ack {
+                enqueued: 1,
+                evicted: 0,
+                ..
+            }
+        ));
+    }
+    Ok((server, subscriber))
+}
+
+#[tokio::test]
+async fn shutdown_drains_enqueued_events() -> io::Result<()> {
+    let (server, mut subscriber) = queued_shutdown_server().await?;
+    server.shutdown.cancel();
+    for _ in 0..SHUTDOWN_EVENTS {
+        assert!(matches!(
+            subscriber.receive().await?,
+            ServerFrame::Event { .. }
+        ));
+    }
+    assert!(
+        timeout(Duration::from_secs(3), subscriber.framed.next())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "subscriber stayed open"))?
+            .is_none()
+    );
+    let report = server.stop().await?;
+    assert_eq!(report.forced_connections, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_forces_a_nonreading_connection() -> io::Result<()> {
+    let (server, _subscriber) = queued_shutdown_server().await?;
+    let report = timeout(Duration::from_secs(3), server.stop())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shutdown missed its deadline"))??;
+    assert_eq!(report.forced_connections, 1);
+    Ok(())
+}
+
 fn hello(request_id: u32, name: &[u8]) -> Bytes {
     named_frame(HELLO, request_id, name, &[])
 }
