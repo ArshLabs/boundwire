@@ -35,7 +35,11 @@ pub async fn run_server(
         .validate()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
-    let (broker, broker_task) = spawn_broker(limits.broker_queue, shutdown.clone());
+    let (broker, broker_task) = spawn_broker(
+        limits.broker_queue,
+        limits.max_subscriptions,
+        shutdown.clone(),
+    );
     let permits = Arc::new(Semaphore::new(limits.max_connections));
     let mut connections = JoinSet::new();
     let mut next_connection_id = 1_u64;

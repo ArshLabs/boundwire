@@ -74,11 +74,12 @@ impl BrokerHandle {
 
 pub(crate) fn spawn_broker(
     command_capacity: usize,
+    max_subscriptions: usize,
     shutdown: CancellationToken,
 ) -> (BrokerHandle, tokio::task::JoinHandle<()>) {
     let (commands, receiver) = mpsc::channel(command_capacity);
     let handle = BrokerHandle { commands };
-    let task = tokio::spawn(Broker::new(receiver).run(shutdown));
+    let task = tokio::spawn(Broker::new(receiver, max_subscriptions).run(shutdown));
     (handle, task)
 }
 
@@ -116,15 +117,17 @@ struct Broker {
     connections: HashMap<ConnectionId, Subscriber>,
     topics: HashMap<Topic, HashSet<ConnectionId>>,
     next_event_id: u64,
+    max_subscriptions: usize,
 }
 
 impl Broker {
-    fn new(commands: mpsc::Receiver<BrokerCommand>) -> Self {
+    fn new(commands: mpsc::Receiver<BrokerCommand>, max_subscriptions: usize) -> Self {
         Self {
             commands,
             connections: HashMap::new(),
             topics: HashMap::new(),
             next_event_id: 1,
+            max_subscriptions,
         }
     }
 
@@ -198,6 +201,19 @@ impl Broker {
         let Some(subscriber) = self.connections.get_mut(&id) else {
             return;
         };
+
+        if !subscriber.topics.contains(&topic) && subscriber.topics.len() >= self.max_subscriptions
+        {
+            self.send_or_remove(
+                id,
+                ServerMessage::Error {
+                    request_id,
+                    code: ErrorCode::TooManySubscriptions,
+                    detail: "subscription limit reached",
+                },
+            );
+            return;
+        }
 
         subscriber.topics.insert(topic.clone());
         self.topics.entry(topic).or_default().insert(id);
@@ -329,7 +345,7 @@ mod tests {
     async fn evicts_only_the_full_subscriber() {
         let limits = Limits::default();
         let shutdown = CancellationToken::new();
-        let (broker, task) = spawn_broker(16, shutdown.clone());
+        let (broker, task) = spawn_broker(16, limits.max_subscriptions, shutdown.clone());
         let topic = Topic::parse(b"blocks", &limits).unwrap();
 
         let (slow_tx, mut slow_rx) = mpsc::channel(1);

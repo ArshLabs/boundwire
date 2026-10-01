@@ -369,6 +369,63 @@ async fn slow_socket_does_not_block_fast_subscriber() -> io::Result<()> {
 
 const SHUTDOWN_EVENTS: u32 = 1_024;
 
+#[tokio::test]
+async fn subscription_limit_preserves_existing_membership() -> io::Result<()> {
+    let limits = Limits {
+        max_subscriptions: 1,
+        ..Limits::default()
+    };
+    let server = TestServer::start(limits.clone()).await?;
+    let mut subscriber = TestClient::connect(server.address, &limits, b"subscriber").await?;
+    for request_id in 2..=3 {
+        subscriber.send(subscribe(request_id, b"first")).await?;
+        assert!(matches!(
+            subscriber.receive().await?,
+            ServerFrame::Ack { request_id: received, .. } if received == request_id
+        ));
+    }
+    subscriber.send(subscribe(4, b"extra")).await?;
+    assert!(matches!(
+        subscriber.receive().await?,
+        ServerFrame::Error {
+            request_id: 4,
+            code: 4
+        }
+    ));
+
+    let mut publisher = TestClient::connect(server.address, &limits, b"publisher").await?;
+    publisher
+        .send(publish(2, b"extra", b"rejected-topic"))
+        .await?;
+    assert!(matches!(
+        publisher.receive().await?,
+        ServerFrame::Ack {
+            matched: 0,
+            enqueued: 0,
+            ..
+        }
+    ));
+    publisher
+        .send(publish(3, b"first", b"still-subscribed"))
+        .await?;
+    assert!(matches!(
+        publisher.receive().await?,
+        ServerFrame::Ack {
+            matched: 1,
+            enqueued: 1,
+            evicted: 0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        subscriber.receive().await?,
+        ServerFrame::Event { topic, payload }
+            if topic.as_ref() == b"first" && payload.as_ref() == b"still-subscribed"
+    ));
+    server.stop().await?;
+    Ok(())
+}
+
 async fn queued_shutdown_server() -> io::Result<(TestServer, TestClient)> {
     let limits = Limits {
         outbound_queue: SHUTDOWN_EVENTS as usize + 2,

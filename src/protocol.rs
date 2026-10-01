@@ -21,6 +21,7 @@ pub struct Limits {
     pub broker_queue: usize,
     pub outbound_queue: usize,
     pub max_connections: usize,
+    pub max_subscriptions: usize,
 }
 
 impl Default for Limits {
@@ -32,15 +33,16 @@ impl Default for Limits {
             broker_queue: 128,
             outbound_queue: 32,
             max_connections: 64,
+            max_subscriptions: 64,
         }
     }
 }
 
 impl Limits {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.broker_queue == 0 || self.max_connections == 0 {
+        if self.broker_queue == 0 || self.max_connections == 0 || self.max_subscriptions == 0 {
             return Err(ProtocolError::InvalidLimits(
-                "broker queue and connection limits must be nonzero",
+                "broker queue, connection, and subscription limits must be nonzero",
             ));
         }
         if self.outbound_queue < 2 {
@@ -202,6 +204,7 @@ pub(crate) enum ErrorCode {
     ExpectedHello = 1,
     AlreadyActive = 2,
     EventIdExhausted = 3,
+    TooManySubscriptions = 4,
 }
 
 #[derive(Debug, PartialEq)]
@@ -586,6 +589,18 @@ mod tests {
             ..Limits::default()
         };
 
+        assert!(matches!(
+            limits.validate(),
+            Err(ProtocolError::InvalidLimits(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_subscription_limit() {
+        let limits = Limits {
+            max_subscriptions: 0,
+            ..Limits::default()
+        };
         assert!(matches!(
             limits.validate(),
             Err(ProtocolError::InvalidLimits(_))
